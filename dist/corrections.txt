@@ -1,0 +1,35 @@
+# corrections.txt
+#
+# Applied in file order, once each, case-insensitively.
+# Blank lines and lines starting with '#' are ignored.
+#
+# Two rule forms:
+#   literal => replacement        whole-word match, case adapted to the source
+#   regex: PATTERN => replacement PATTERN is a Go regexp, matched case-insensitively
+#
+# IMPORTANT: only add a literal rule for a string that is NEVER correct.
+# "lessons => lessens" would break every legitimate use of "lessons".
+# For cases like that, use a regex rule with surrounding context.
+
+# --- Observed on L'Abri recordings ---
+
+sensorous => censorious
+termith => termeth
+
+# "at L'Abri" rendered as "at lab" by all models tested.
+# Hazard: "at lab meeting" would be wrongly rewritten. Acceptable for this
+# corpus; use a regex rule with context if it ever misfires.
+at lab => at L'Abri
+
+# "Pontus" in 1 Peter 1:1, misheard as "Pontius" by every model tested.
+# Hazard: Pontius Pilate. Safe while the corpus is lecture material.
+Pontius => Pontus
+
+# --- Context-sensitive cases, shown for reference ---
+
+# "contracts and lessons" should be "contracts and lessens".
+# Cannot be a literal rule: "lessons" is a common correct word.
+regex: (contracts? and )lessons\b => ${1}lessens
+
+# --- Add speaker and place names as you find them ---
+# Jamie Kipiak => Jamie Kipiak

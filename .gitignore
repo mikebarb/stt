@@ -32,3 +32,19 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Build outputs
+build/
+dist/*
+!dist/corrections.txt
+third_party/whisper.cpp/build/
+*.exe
+*.o
+*.a
+
+# Models, audio, scratch outputs
+models/
+out/
+*.bin
+*.mp3
+*.wav
