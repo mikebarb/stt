@@ -42,9 +42,7 @@ type batchConfig struct {
 // Discovery
 // ---------------------------------------------------------------------------
 
-// expectedOutputs lists the artefacts a completed run leaves behind. Used both
-// to decide whether a file is already done (resume) and by the writer, so the
-// two can never disagree about filenames.
+// expectedOutputs lists the transcript artefacts a completed run leaves behind.
 func expectedOutputs(stem, tag string, all bool) map[string]string {
 	base := stem + "_" + tag
 	m := map[string]string{
@@ -60,11 +58,29 @@ func expectedOutputs(stem, tag string, all bool) map[string]string {
 	return m
 }
 
-// discover returns the audio files in cfg.dir that still need transcribing.
+// expectedPack returns the archive record path for a completed run.
 //
-// A file counts as complete only when *every* expected artefact for the
-// current model tag exists. That makes resume safe and makes changing models
-// a genuine re-run rather than a silent skip. -force overrides.
+// Locally the pack is model-tagged, so re-transcribing with a better model
+// writes a new pack and leaves the previous one intact. The published copy in
+// R2 is renamed to <stem>.stt.json by the upload tool.
+func expectedPack(stem, tag string) string {
+	return stem + "_" + tag + ".stt.json"
+}
+
+// isComplete reports whether every artefact for this file and model exists,
+// including the pack. Making the pack part of completeness means a run that
+// produced transcripts but no archive record is retried rather than skipped.
+func isComplete(stem string, cfg batchConfig) bool {
+	if !allExist(expectedOutputs(stem, cfg.tag, cfg.all)) {
+		return false
+	}
+	if _, err := os.Stat(expectedPack(stem, cfg.tag)); err != nil {
+		return false
+	}
+	return true
+}
+
+// discover returns the audio files in cfg.dir that still need transcribing.
 func discover(cfg batchConfig) ([]string, error) {
 	entries, err := os.ReadDir(cfg.dir)
 	if err != nil {
@@ -90,7 +106,7 @@ func discover(cfg batchConfig) ([]string, error) {
 		path := filepath.Join(cfg.dir, e.Name())
 		stem := outputStem(path, cfg.startSec, cfg.endSec)
 
-		if !cfg.force && allExist(expectedOutputs(stem, cfg.tag, cfg.all)) {
+		if !cfg.force && isComplete(stem, cfg) {
 			continue
 		}
 		out = append(out, path)
@@ -100,7 +116,7 @@ func discover(cfg batchConfig) ([]string, error) {
 }
 
 func outputStem(inputPath string, startSec, endSec float64) string {
-	stem := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) // <-- this is the line you already have
+	stem := strings.TrimSuffix(inputPath, filepath.Ext(inputPath))
 	if startSec > 0 || endSec > 0 {
 		if endSec > 0 {
 			stem = fmt.Sprintf("%s_%04.0f-%04.0f", stem, startSec, startSec+endSec)
@@ -223,7 +239,7 @@ func runBatch(cfg batchConfig) error {
 		return err
 	}
 	logger.Printf("batch: model=%s threads=%d files=%d dir=%s",
-		cfg.tag, cfg.threads, len(files), cfg.dir)
+		cfg.tag, resolvedThreads(cfg.threads), len(files), cfg.dir)
 	logger.Printf("batch: log file %s", logPath)
 
 	if len(files) == 0 {
@@ -239,10 +255,13 @@ func runBatch(cfg batchConfig) error {
 		logger.Printf("batch: %d correction rule(s) from %s", n, cfg.corrections)
 	}
 
+	// One pack context for the whole batch: model digests are computed once.
+	packCtx := newPackContext(cfg.modelPath, cfg.tag, cfg.corrections, cfg.threads)
+
 	model, err := whisper.New(cfg.modelPath, whisper.Options{
 		Threads: cfg.threads,
 		Quiet:   cfg.quiet,
-		Audit:   true, // tokens needed for stats, not just the audit file
+		Audit:   true, // tokens needed for stats, the audit file and the pack
 	})
 	if err != nil {
 		return err
@@ -280,7 +299,9 @@ func runBatch(cfg batchConfig) error {
 			continue
 		}
 
-		// honours -start / -end
+		// The pack records the full file's length even for a sliced run.
+		fullAudioSec := float64(len(samples)) / 16000.0
+
 		samples, err = sliceSamples(samples, cfg.startSec, cfg.endSec)
 		if err != nil {
 			logger.Printf("skip %s: %v", filepath.Base(path), err)
@@ -304,7 +325,7 @@ func runBatch(cfg batchConfig) error {
 		st.finish(audioSec, elapsed.Seconds())
 
 		if errors.Is(err, whisper.ErrAborted) {
-			logger.Printf("aborted %s after %s — no output written",
+			logger.Printf("aborted %s after %s - no output written",
 				filepath.Base(path), roundSec(elapsed))
 			break
 		}
@@ -315,15 +336,29 @@ func runBatch(cfg batchConfig) error {
 		}
 
 		corr.Reset()
-		if n := corr.ApplyToSegments(segs); n > 0 {
-			logger.Printf("  corrections: %d replacement(s)", n)
+		nCorr, applied := corr.ApplyToSegmentsRecorded(segs)
+		if nCorr > 0 {
+			logger.Printf("  corrections: %d replacement(s)", nCorr)
 		}
 
-		// --- new: compute statistics here, where elapsed and logger live ---
 		rs := computeStats(segs, path, cfg.tag, audioSec, elapsed,
 			cfg.startSec, cfg.endSec, cfg.audit)
 
-		written, err := writeAll(segs, path, cfg, audioSec, rs, corr)
+		pf := packFile{
+			InputPath:    path,
+			FullAudioSec: fullAudioSec,
+			AudioSec:     audioSec,
+			StartSec:     cfg.startSec,
+			EndSec:       cfg.endSec,
+			AuditThresh:  cfg.audit,
+			Started:      t0,
+			Finished:     t0.Add(elapsed),
+			Segments:     segs,
+			Stats:        rs,
+			Applied:      applied,
+		}
+
+		written, err := writeAll(pf, cfg, corr, packCtx)
 		if err != nil {
 			logger.Printf("error writing %s: %v", filepath.Base(path), err)
 			failed++
@@ -374,21 +409,20 @@ func (s *batchState) avgRatioOr(def float64) float64 {
 	return def
 }
 
-// writeAll renders every expected artefact for one file, atomically.
-func writeAll(segs []whisper.Segment, inputPath string, cfg batchConfig,
-	audioSec float64, rs runStats, corr *corrector) (int, error) {
-
-	stem := outputStem(inputPath, cfg.startSec, cfg.endSec)
+// writeAll renders every artefact for one file: the transcript formats, the
+// audit, the corrections log, the pack, then the statistics.
+func writeAll(f packFile, cfg batchConfig, corr *corrector, packCtx *packContext) (int, error) {
+	stem := outputStem(f.InputPath, cfg.startSec, cfg.endSec)
 	outputs := expectedOutputs(stem, cfg.tag, cfg.all)
 
-	if err := writeFormats(segs, inputPath, cfg, audioSec, outputs); err != nil {
+	if err := writeFormats(f.Segments, f.InputPath, cfg, f.AudioSec, outputs); err != nil {
 		return 0, err
 	}
 
 	if cfg.audit > 0 {
 		sidecar := stem + "_" + cfg.tag + ".audit.txt"
 		var b strings.Builder
-		if _, err := writeAuditWriter(&b, segs, cfg.audit, cfg.tag); err != nil {
+		if _, err := writeAuditWriter(&b, f.Segments, cfg.audit, cfg.tag); err != nil {
 			return 0, err
 		}
 		if err := writeFileAtomic(sidecar, []byte(b.String())); err != nil {
@@ -396,19 +430,26 @@ func writeAll(segs []whisper.Segment, inputPath string, cfg batchConfig,
 		}
 	}
 
-	// Corrections log — only written when at least one rule fired.
-	if err := writeCorrectionsLog(stem+"_"+cfg.tag+".corrections.log", corr, cfg.tag, inputPath); err != nil {
+	// Corrections log - only written when at least one rule fired.
+	if err := writeCorrectionsLog(stem+"_"+cfg.tag+".corrections.log", corr, cfg.tag, f.InputPath); err != nil {
 		return len(outputs), err
 	}
 
+	// The archive record. A failure here leaves the file incomplete, so the
+	// next run retries it rather than silently leaving a transcript with no
+	// provenance.
+	if err := packCtx.write(expectedPack(stem, cfg.tag), f); err != nil {
+		return len(outputs), fmt.Errorf("pack: %w", err)
+	}
+
 	// Diagnostics last: a stats failure must never cost a completed transcript.
-	if err := recordStats(stem, cfg.dir, rs); err != nil {
+	if err := recordStats(stem, cfg.dir, f.Stats); err != nil {
 		return len(outputs), err
 	}
 	return len(outputs), nil
 }
 
-// writeFormats is the previous loop body, extracted so writeAll stays readable.
+// writeFormats writes the transcript itself in every requested format.
 func writeFormats(segs []whisper.Segment, inputPath string,
 	cfg batchConfig, audioSec float64, outputs map[string]string) error {
 

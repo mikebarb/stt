@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -45,6 +44,7 @@ func run() error {
 		force       = flag.Bool("force", false, "re-transcribe files that already have outputs")
 		onInterrupt = flag.String("on-interrupt", "ask", "Ctrl+C behaviour: ask|finish|abort|now")
 		corrFile    = flag.String("corrections", "", "corrections rules file (default: corrections.txt beside the exe)")
+		packOut     = flag.String("pack", "", "write the pack to this file (default: beside the input with -txt/-all)")
 	)
 
 	flag.Usage = func() {
@@ -121,12 +121,15 @@ func run() error {
 		fmt.Printf("corrections: %d rule(s) from %s\n", n, corrPath)
 	}
 
+	// Digests are computed lazily, so a stdout-only run pays nothing.
+	packCtx := newPackContext(*modelPath, tag, corrPath, *threads)
+
 	model, err := whisper.New(*modelPath, whisper.Options{
 		Threads: *threads,
 		UseGPU:  false,
 		Quiet:   *quiet,
 		Audit:   *audit > 0,
-		Tokens:  *doStats || *audit > 0 || *writeTxt || *all,
+		Tokens:  true, // the pack always records token confidences
 	})
 	if err != nil {
 		return err
@@ -137,6 +140,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+
+	// The pack records the full file's length even for a sliced run.
+	fullAudioSeconds := float64(len(samples)) / 16000.0
+
 	samples, err = sliceSamples(samples, *startSec, *endSec)
 	if err != nil {
 		return err
@@ -153,8 +160,25 @@ func run() error {
 
 	// Corrections run before stats and before any writer, so every artefact
 	// and every statistic describes the delivered text.
-	if n := corr.ApplyToSegments(segs); n > 0 {
-		fmt.Printf("corrections: %d replacement(s)\n", n)
+	nCorr, applied := corr.ApplyToSegmentsRecorded(segs)
+	if nCorr > 0 {
+		fmt.Printf("corrections: %d replacement(s)\n", nCorr)
+	}
+
+	newPackFile := func(stats runStats) packFile {
+		return packFile{
+			InputPath:    inputPath,
+			FullAudioSec: fullAudioSeconds,
+			AudioSec:     audioSeconds,
+			StartSec:     *startSec,
+			EndSec:       *endSec,
+			AuditThresh:  *audit,
+			Started:      start,
+			Finished:     start.Add(elapsed),
+			Segments:     segs,
+			Stats:        stats,
+			Applied:      applied,
+		}
 	}
 
 	switch {
@@ -185,14 +209,25 @@ func run() error {
 			fmt.Fprintf(os.Stderr, "warning: corrections log: %v\n", err)
 		}
 
-		if *doStats {
+		if *doStats || *packOut != "" {
 			rs := computeStats(segs, inputPath, tag, audioSeconds, elapsed,
 				*startSec, *endSec, *audit)
-			if err := writeStatsAtomic(statsPath(outStem, tag), rs); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: stats sidecar: %v\n", err)
+
+			if *doStats {
+				if err := writeStatsAtomic(statsPath(outStem, tag), rs); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: stats sidecar: %v\n", err)
+				}
+				if err := appendIndex(filepath.Dir(inputPath), rs); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: stats index: %v\n", err)
+				}
 			}
-			if err := appendIndex(filepath.Dir(inputPath), rs); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: stats index: %v\n", err)
+
+			if *packOut != "" {
+				if err := packCtx.write(*packOut, newPackFile(rs)); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: pack: %v\n", err)
+				} else {
+					fmt.Printf("wrote pack %s\n", *packOut)
+				}
 			}
 		}
 
@@ -239,6 +274,17 @@ func run() error {
 			fmt.Printf("wrote stats %s\n", statsPath(stem, tag))
 		}
 
+		// The archive record. Part of what makes a run "complete".
+		pPath := expectedPack(stem, tag)
+		if *packOut != "" {
+			pPath = *packOut
+		}
+		if err := packCtx.write(pPath, newPackFile(rs)); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: pack: %v\n", err)
+		} else {
+			fmt.Printf("wrote pack %s\n", pPath)
+		}
+
 	default:
 		// --- stdout: no side files, report to stderr ---
 		var buf bytes.Buffer
@@ -277,17 +323,12 @@ var (
 func modelTag(modelPath string) string {
 	base := filepath.Base(modelPath)
 
-	// Preferred: recognise the upstream naming convention and drop the
-	// "ggml-" prefix and ".bin" suffix.
 	if m := modelNameRe.FindStringSubmatch(base); m != nil {
 		base = m[1]
 	} else {
-		// Fallback: keep whatever precedes the final extension.
 		base = strings.TrimSuffix(base, filepath.Ext(base))
 	}
 
-	// Defensive: model files can be named arbitrarily, and a name is about
-	// to become part of a path component.
 	tag := unsafeFileCharsRe.ReplaceAllString(base, "-")
 	tag = strings.Trim(tag, "-.")
 
@@ -297,7 +338,7 @@ func modelTag(modelPath string) string {
 	return tag
 }
 
-// outputs maps default-trio filenames to their format names.
+// trioPaths maps default-trio filenames to their format names.
 func trioPaths(stem, tag string) map[string]string {
 	base := stem + "_" + tag
 	return map[string]string{
@@ -318,34 +359,4 @@ func defaultCorrectionsPath() string {
 		}
 	}
 	return "corrections.txt"
-}
-
-// writeAudit emits a review queue: every token whose probability fell
-// below the threshold, with its own timestamps so a reviewer can jump
-// straight to that word in Audacity.
-func writeAuditWriter(w io.Writer, segs []whisper.Segment, threshold float64, modelUsed string) (int, error) {
-	flagged := 0
-	fmt.Fprintf(w, "# audit threshold p < %.2f  model %s\n", threshold, modelUsed)
-	for _, s := range segs {
-		for _, t := range s.Tokens {
-			if float64(t.Prob) >= threshold {
-				continue
-			}
-			flagged++
-			fmt.Fprintf(w, "[%s -> %s] p=%.3f %q\n",
-				csStamp(t.Start), csStamp(t.End), t.Prob, strings.TrimSpace(t.Text))
-		}
-	}
-	fmt.Fprintf(w, "# %d tokens flagged\n", flagged)
-	return flagged, nil
-}
-
-// keep the file-based form for the single-file path
-func writeAudit(path string, segs []whisper.Segment, threshold float64, modelUsed string) (int, error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	return writeAuditWriter(f, segs, threshold, modelUsed)
 }

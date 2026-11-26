@@ -50,8 +50,8 @@ type Segment struct {
 }
 
 type Model struct {
-	ptr   *C.stt_ctx
-	audit bool
+	ptr    *C.stt_ctx
+	tokens bool
 }
 
 var ErrAborted = errors.New("whisper: transcription aborted")
@@ -90,7 +90,7 @@ func New(modelPath string, o Options) (*Model, error) {
 		return nil, fmt.Errorf("whisper: failed to load model %q", modelPath)
 	}
 
-	m := &Model{ptr: ptr, audit: o.Audit}
+	m := &Model{ptr: ptr, tokens: o.Audit || o.Tokens}
 	runtime.SetFinalizer(m, func(x *Model) { _ = x.Close() })
 	return m, nil
 }
@@ -132,7 +132,7 @@ func (m *Model) Transcribe(samples []float32) ([]Segment, error) {
 			End:   time.Duration(int64(C.stt_segment_t1(m.ptr, C.int(i)))) * 10 * time.Millisecond,
 			Text:  C.GoString(C.stt_segment_text(m.ptr, C.int(i))),
 		}
-		if m.audit {
+		if m.tokens {
 			seg.Tokens = m.segmentTokens(C.int(i))
 		}
 		out = append(out, seg)
