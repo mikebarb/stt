@@ -5,6 +5,7 @@
 struct stt_ctx {
     struct whisper_context * wctx;
     int n_threads;
+    int no_context;
     volatile int abort_requested;
     volatile int was_aborted;
 };
@@ -14,7 +15,7 @@ static bool stt_abort_cb(void * user_data) {
     return (h != NULL && h->abort_requested != 0);
 }
 
-stt_ctx * stt_init(const char * model_path, int n_threads, int use_gpu) {
+stt_ctx * stt_init(const char * model_path, int n_threads, int use_gpu, int no_context) {
     if (model_path == NULL) return NULL;
 
     struct whisper_context_params cparams = whisper_context_default_params();
@@ -29,6 +30,7 @@ stt_ctx * stt_init(const char * model_path, int n_threads, int use_gpu) {
 
     h->wctx      = wctx;
     h->n_threads = (n_threads > 0) ? n_threads : 4;
+    h->no_context = no_context;
     return h;
 }
 
@@ -44,22 +46,26 @@ int stt_transcribe(stt_ctx * h, const float * samples, int n_samples) {
     struct whisper_full_params p =
         whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
 
-    p.strategy                  = WHISPER_SAMPLING_BEAM_SEARCH;
-    p.n_threads                 = h->n_threads;
-    p.print_realtime            = false;
-    p.print_progress            = false;
-    p.print_timestamps          = false;
-    p.print_special             = false;
-    p.translate                 = false;
-    p.language                  = "en";
-    p.single_segment            = false;
-    p.beam_search.beam_size     = 5;
-    p.token_timestamps          = true;     /* required for per-token p and t0/t1 */
-    p.abort_callback            = stt_abort_cb;
-    p.abort_callback_user_data  = h;
-
-
+    p.strategy                   = WHISPER_SAMPLING_BEAM_SEARCH;
+    p.n_threads                  = h->n_threads;
+    p.print_realtime             = false;
+    p.print_progress             = false;
+    p.print_timestamps           = false;
+    p.print_special              = false;
+    p.translate                  = false;
+    p.language                   = "en";
+    p.single_segment             = false;
+    p.beam_search.beam_size      = 5;
+    p.token_timestamps           = true;    /* required for per-token p and t0/t1 */
+    p.abort_callback             = stt_abort_cb;
+    p.abort_callback_user_data   = h;
+    p.no_context                 = true;    /* never bleed previous file into next in batch mode */
+    if (h->no_context != 0) {
+        p.n_max_text_ctx = 0;                /* disable rolling window-to-window context (-mc 0) */
+    }
+    
     int rc = whisper_full(h->wctx, p, samples, n_samples);
+    
     if (rc != 0) {
         if (h->abort_requested != 0) {
             h->was_aborted = 1;

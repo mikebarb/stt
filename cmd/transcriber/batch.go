@@ -36,6 +36,7 @@ type batchConfig struct {
 	startSec    float64
 	endSec      float64
 	corrections string // path to the rules file; empty means none
+	noContext   bool
 }
 
 // ---------------------------------------------------------------------------
@@ -80,11 +81,25 @@ func isComplete(stem string, cfg batchConfig) bool {
 	return true
 }
 
-// discover returns the audio files in cfg.dir that still need transcribing.
-func discover(cfg batchConfig) ([]string, error) {
+// discovery is the outcome of scanning a directory: the audio files that need
+// transcribing, and the audio files already complete for this model tag.
+//
+// The second list exists so a resumed batch can report how much it skipped.
+// Without it, "0 skipped" is indistinguishable from "nothing was already done",
+// which is the one thing a resume record must not be ambiguous about.
+type discovery struct {
+	Work []string // audio files needing transcription
+	Done []string // audio files already complete for cfg.tag
+}
+
+// discover returns the audio files in cfg.dir that still need transcribing,
+// together with those that are already complete.
+func discover(cfg batchConfig) (discovery, error) {
+	var d discovery
+
 	entries, err := os.ReadDir(cfg.dir)
 	if err != nil {
-		return nil, fmt.Errorf("read directory: %w", err)
+		return d, fmt.Errorf("read directory: %w", err)
 	}
 
 	// Remove partials left behind by a killed run. They are never output.
@@ -94,7 +109,6 @@ func discover(cfg batchConfig) ([]string, error) {
 		}
 	}
 
-	var out []string
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -107,12 +121,14 @@ func discover(cfg batchConfig) ([]string, error) {
 		stem := outputStem(path, cfg.startSec, cfg.endSec)
 
 		if !cfg.force && isComplete(stem, cfg) {
+			d.Done = append(d.Done, path)
 			continue
 		}
-		out = append(out, path)
+		d.Work = append(d.Work, path)
 	}
-	sort.Strings(out)
-	return out, nil
+	sort.Strings(d.Work)
+	sort.Strings(d.Done)
+	return d, nil
 }
 
 func outputStem(inputPath string, startSec, endSec float64) string {
@@ -234,16 +250,22 @@ func runBatch(cfg batchConfig) error {
 	// Console output is mirrored verbatim into the log.
 	logger := log.New(io.MultiWriter(os.Stdout, lf), "", log.LstdFlags)
 
-	files, err := discover(cfg)
+	disc, err := discover(cfg)
 	if err != nil {
 		return err
 	}
-	logger.Printf("batch: model=%s threads=%d files=%d dir=%s",
-		cfg.tag, resolvedThreads(cfg.threads), len(files), cfg.dir)
+	files := disc.Work
+
+	logger.Printf("batch: model=%s threads=%d files=%d skipped=%d dir=%s",
+		cfg.tag, resolvedThreads(cfg.threads), len(disc.Work), len(disc.Done), cfg.dir)
 	logger.Printf("batch: log file %s", logPath)
 
 	if len(files) == 0 {
-		logger.Printf("batch: nothing to do")
+		if len(disc.Done) > 0 {
+			logger.Printf("batch: nothing to do (%d already complete)", len(disc.Done))
+		} else {
+			logger.Printf("batch: nothing to do (no audio files found)")
+		}
 		return nil
 	}
 
@@ -256,12 +278,13 @@ func runBatch(cfg batchConfig) error {
 	}
 
 	// One pack context for the whole batch: model digests are computed once.
-	packCtx := newPackContext(cfg.modelPath, cfg.tag, cfg.corrections, cfg.threads)
+	packCtx := newPackContext(cfg.modelPath, cfg.tag, cfg.corrections, cfg.threads, cfg.noContext)
 
 	model, err := whisper.New(cfg.modelPath, whisper.Options{
-		Threads: cfg.threads,
-		Quiet:   cfg.quiet,
-		Audit:   true, // tokens needed for stats, the audit file and the pack
+		Threads:   cfg.threads,
+		Quiet:     cfg.quiet,
+		Audit:     true, // tokens needed for stats, the audit file and the pack
+		NoContext: cfg.noContext,
 	})
 	if err != nil {
 		return err
@@ -278,7 +301,8 @@ func runBatch(cfg batchConfig) error {
 	go interruptHandler(sigs, logger, cfg, st, &stopAfterCurrent, &abortNow)
 
 	total := time.Now()
-	var done, skipped, failed int
+	done, failed := 0, 0
+	skipped := len(disc.Done)
 
 	for _, path := range files {
 		if atomic.LoadInt32(&abortNow) != 0 {
@@ -446,7 +470,18 @@ func writeAll(f packFile, cfg batchConfig, corr *corrector, packCtx *packContext
 	if err := recordStats(stem, cfg.dir, f.Stats); err != nil {
 		return len(outputs), err
 	}
-	return len(outputs), nil
+
+	written := len(outputs) // the transcript formats
+	if cfg.audit > 0 {
+		written++ // audit sidecar
+	}
+	if corr != nil && len(corr.rules) > 0 {
+		written++ // corrections log, only when a rule fired
+	}
+	written++ // the pack
+	written++ // the stats sidecar
+
+	return written, nil
 }
 
 // writeFormats writes the transcript itself in every requested format.

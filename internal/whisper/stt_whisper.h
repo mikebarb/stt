@@ -6,7 +6,7 @@
 typedef struct stt_ctx stt_ctx;
 
 /* Returns NULL on failure. n_threads <= 0 selects a default. */
-stt_ctx * stt_init(const char * model_path, int n_threads, int use_gpu);
+stt_ctx * stt_init(const char * model_path, int n_threads, int use_gpu, int no_context);
 void      stt_free(stt_ctx * h);
 
 /* Returns segment count, or negative on error. */

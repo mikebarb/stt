@@ -185,6 +185,8 @@ type BuildInput struct {
 	// the .stats.json sidecar can never disagree. When nil, Build computes
 	// them from the segments.
 	Statistics *StatisticsInfo
+
+	NoContext bool
 }
 
 // Build assembles a complete stt-pack/1 document from a transcription run.
@@ -278,7 +280,7 @@ func Build(in BuildInput) *Pack {
 			BestOf:                  5,
 			Language:                "en",
 			Translate:               false,
-			ConditionOnPreviousText: true,
+			ConditionOnPreviousText: !in.NoContext,
 			StartOffsetSeconds:      in.StartOffsetSec,
 			EndOffsetSeconds:        in.EndOffsetSec,
 			Truncated:               in.StartOffsetSec > 0 || in.EndOffsetSec > 0,

@@ -26,11 +26,12 @@ import (
 )
 
 type Options struct {
-	Threads int
-	UseGPU  bool
-	Quiet   bool // suppress whisper.cpp's native stderr logging
-	Audit   bool // write low-confidence report (caller-level concern)
-	Tokens  bool // capture token detail (needed for stats)
+	Threads   int
+	UseGPU    bool
+	Quiet     bool // suppress whisper.cpp's native stderr logging
+	Audit     bool // write low-confidence report (caller-level concern)
+	Tokens    bool // capture token detail (needed for stats)
+	NoContext bool // decode each window independently
 }
 
 // Token is one decoded token within a segment, with the model's confidence
@@ -85,7 +86,12 @@ func New(modelPath string, o Options) (*Model, error) {
 		gpu = 1
 	}
 
-	ptr := C.stt_init(cPath, C.int(o.Threads), gpu)
+	noCtx := C.int(0)
+	if o.NoContext {
+		noCtx = 1
+	}
+
+	ptr := C.stt_init(cPath, C.int(o.Threads), gpu, noCtx)
 	if ptr == nil {
 		return nil, fmt.Errorf("whisper: failed to load model %q", modelPath)
 	}

@@ -18,6 +18,7 @@ type packContext struct {
 	tag       string
 	corrPath  string
 	threads   int
+	noContext bool
 
 	modelSize int64
 	modelSHA  string
@@ -49,12 +50,13 @@ func resolvedThreads(n int) int {
 	return runtime.NumCPU()
 }
 
-func newPackContext(modelPath, tag, corrPath string, threads int) *packContext {
+func newPackContext(modelPath, tag, corrPath string, threads int, noContext bool) *packContext {
 	return &packContext{
 		modelPath: modelPath,
 		tag:       tag,
 		corrPath:  corrPath,
 		threads:   resolvedThreads(threads),
+		noContext: noContext,
 	}
 }
 
@@ -149,6 +151,7 @@ func (c *packContext) write(path string, f packFile) error {
 
 		Segments:   toFormatSegments(f.Segments),
 		Statistics: statsPtr(f.Stats),
+		NoContext:  c.noContext,
 	})
 
 	return pack.WriteAtomic(path, p)

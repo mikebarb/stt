@@ -45,6 +45,7 @@ func run() error {
 		onInterrupt = flag.String("on-interrupt", "ask", "Ctrl+C behaviour: ask|finish|abort|now")
 		corrFile    = flag.String("corrections", "", "corrections rules file (default: corrections.txt beside the exe)")
 		packOut     = flag.String("pack", "", "write the pack to this file (default: beside the input with -txt/-all)")
+		noContext   = flag.Bool("no-context", false, "decode each window independently (prevents repetition loops over music)")
 	)
 
 	flag.Usage = func() {
@@ -86,6 +87,7 @@ func run() error {
 			startSec:    *startSec,
 			endSec:      *endSec,
 			corrections: corrPath,
+			noContext:   *noContext,
 		})
 	}
 
@@ -122,14 +124,15 @@ func run() error {
 	}
 
 	// Digests are computed lazily, so a stdout-only run pays nothing.
-	packCtx := newPackContext(*modelPath, tag, corrPath, *threads)
+	packCtx := newPackContext(*modelPath, tag, corrPath, *threads, *noContext)
 
 	model, err := whisper.New(*modelPath, whisper.Options{
-		Threads: *threads,
-		UseGPU:  false,
-		Quiet:   *quiet,
-		Audit:   *audit > 0,
-		Tokens:  true, // the pack always records token confidences
+		Threads:   *threads,
+		UseGPU:    false,
+		Quiet:     *quiet,
+		Audit:     *audit > 0,
+		Tokens:    true, // the pack always records token confidences
+		NoContext: *noContext,
 	})
 	if err != nil {
 		return err
