@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mikebarb/stt/internal/audio"
+	"github.com/mikebarb/stt/internal/pack"
 	"github.com/mikebarb/stt/internal/whisper"
 )
 
@@ -382,17 +383,30 @@ func runBatch(cfg batchConfig) error {
 			Applied:      applied,
 		}
 
-		written, err := writeAll(pf, cfg, corr, packCtx)
+		_, pk, err := writeAll(pf, cfg, corr, packCtx)
 		if err != nil {
 			logger.Printf("error writing %s: %v", filepath.Base(path), err)
 			failed++
 			continue
 		}
 
+		// A repetition loop is invisible to the confidence metrics, so it
+		// must be reported explicitly. The remedy is a re-transcription
+		// with -no-context.
+		if pk != nil && pk.Loop != nil && pk.Loop.IsLoop() {
+			logger.Printf("  WARNING: repetition loop detected (density %.1f%%, %dx) - "+
+				"re-transcribe with -no-context",
+				pk.Loop.Density*100, pk.Loop.Count)
+			for _, sp := range pk.Loop.Spans {
+				logger.Printf("    loop span %.0fs - %.0fs (%.0f wpm, trigger %s)",
+					sp.Start, sp.End, sp.WordsPerMin, sp.Trigger)
+			}
+		}
+
 		done++
-		logger.Printf("done %s: %d segs, %.1f min audio in %s (%.2fx), wpm %.0f, %.1f seg/min, conf %.3f, %d files",
+		logger.Printf("done %s: %d segs, %.1f min audio in %s (%.2fx), wpm %.0f, %.1f seg/min, conf %.3f",
 			filepath.Base(path), len(segs), audioSec/60.0, roundSec(elapsed),
-			audioSec/elapsed.Seconds(), rs.WordsPerMin, rs.SegmentsPerM, rs.MeanTokenConf, written)
+			audioSec/elapsed.Seconds(), rs.WordsPerMin, rs.SegmentsPerM, rs.MeanTokenConf)
 	}
 
 	logger.Printf("batch complete: %d done, %d skipped, %d failed, total %s",
@@ -435,53 +449,43 @@ func (s *batchState) avgRatioOr(def float64) float64 {
 
 // writeAll renders every artefact for one file: the transcript formats, the
 // audit, the corrections log, the pack, then the statistics.
-func writeAll(f packFile, cfg batchConfig, corr *corrector, packCtx *packContext) (int, error) {
+func writeAll(f packFile, cfg batchConfig, corr *corrector, packCtx *packContext) (int, *pack.Pack, error) {
 	stem := outputStem(f.InputPath, cfg.startSec, cfg.endSec)
 	outputs := expectedOutputs(stem, cfg.tag, cfg.all)
 
 	if err := writeFormats(f.Segments, f.InputPath, cfg, f.AudioSec, outputs); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	if cfg.audit > 0 {
 		sidecar := stem + "_" + cfg.tag + ".audit.txt"
 		var b strings.Builder
 		if _, err := writeAuditWriter(&b, f.Segments, cfg.audit, cfg.tag); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 		if err := writeFileAtomic(sidecar, []byte(b.String())); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 	}
 
 	// Corrections log - only written when at least one rule fired.
 	if err := writeCorrectionsLog(stem+"_"+cfg.tag+".corrections.log", corr, cfg.tag, f.InputPath); err != nil {
-		return len(outputs), err
+		return len(outputs), nil, err
 	}
 
 	// The archive record. A failure here leaves the file incomplete, so the
 	// next run retries it rather than silently leaving a transcript with no
 	// provenance.
-	if err := packCtx.write(expectedPack(stem, cfg.tag), f); err != nil {
-		return len(outputs), fmt.Errorf("pack: %w", err)
+	pk, err := packCtx.write(expectedPack(stem, cfg.tag), f)
+	if err != nil {
+		return len(outputs), nil, fmt.Errorf("pack: %w", err)
 	}
 
 	// Diagnostics last: a stats failure must never cost a completed transcript.
 	if err := recordStats(stem, cfg.dir, f.Stats); err != nil {
-		return len(outputs), err
+		return len(outputs), pk, err
 	}
-
-	written := len(outputs) // the transcript formats
-	if cfg.audit > 0 {
-		written++ // audit sidecar
-	}
-	if corr != nil && len(corr.rules) > 0 {
-		written++ // corrections log, only when a rule fired
-	}
-	written++ // the pack
-	written++ // the stats sidecar
-
-	return written, nil
+	return len(outputs), pk, nil
 }
 
 // writeFormats writes the transcript itself in every requested format.

@@ -109,12 +109,12 @@ func packStats(rs runStats) pack.StatisticsInfo {
 //
 // The audio hash is taken from the source MP3 before any -start/-end slicing,
 // so it matches the value held by the catalogue for that lecture.
-func (c *packContext) write(path string, f packFile) error {
+func (c *packContext) write(path string, f packFile) (*pack.Pack, error) {
 	c.ensureDigests()
 
 	audioHash, err := audiohash.CalculateAudioHash(f.InputPath)
 	if err != nil {
-		return fmt.Errorf("audio hash: %w", err)
+		return nil, fmt.Errorf("audio hash: %w", err)
 	}
 
 	var size int64
@@ -154,7 +154,10 @@ func (c *packContext) write(path string, f packFile) error {
 		NoContext:  c.noContext,
 	})
 
-	return pack.WriteAtomic(path, p)
+	if err := pack.WriteAtomic(path, p); err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 func statsPtr(rs runStats) *pack.StatisticsInfo {

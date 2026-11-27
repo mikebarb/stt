@@ -34,6 +34,7 @@ type Pack struct {
 	Statistics  StatisticsInfo  `json:"statistics"`
 	Audit       AuditInfo       `json:"audit"`
 	Transcript  TranscriptInfo  `json:"transcript"`
+	Loop        *LoopInfo       `json:"loop,omitempty"`
 	Summary     *SummaryInfo    `json:"summary,omitempty"`
 }
 
@@ -102,6 +103,8 @@ type StatisticsInfo struct {
 	LowConfidenceTokens   int     `json:"low_confidence_tokens"`
 	LowConfidencePer1k    float64 `json:"low_confidence_per_1k"`
 	ConfidenceThreshold   float64 `json:"confidence_threshold"`
+	LoopDensity           float64 `json:"loop_density"`
+	RepetitionSeconds     float64 `json:"repetition_seconds"`
 }
 
 type FlaggedToken struct {
@@ -247,7 +250,22 @@ func Build(in BuildInput) *Pack {
 		stats = computeStatistics(in.Segments, in.AudioSeconds, in.AuditThreshold)
 	}
 
+	// Repetition analysis. Computed from the segments regardless of where the
+	// statistics came from: the transcriber supplies a pre-computed
+	// StatisticsInfo (from runStats) which cannot know about loops, so setting
+	// these inside the else branch would leave transcriber-built packs
+	// recording loop_density = 0 always.
+	loop := DetectLoops(in.Segments, DefaultLoopN, DefaultLoopMinCount, DefaultLoopMinDensity)
+	stats.LoopDensity = loop.Density
+	stats.RepetitionSeconds = loop.RepetitionSeconds
+
 	audit := computeAudit(in.Segments, in.AuditThreshold)
+
+	var loopPtr *LoopInfo
+	if loop.IsLoop() || len(loop.Spans) > 0 {
+		lp := loop
+		loopPtr = &lp
+	}
 
 	return &Pack{
 		Schema:     SchemaVersion,
@@ -293,6 +311,7 @@ func Build(in BuildInput) *Pack {
 		},
 		Statistics: stats,
 		Audit:      audit,
+		Loop:       loopPtr,
 		Transcript: TranscriptInfo{
 			Text:         text,
 			TextSHA256:   textSHA,

@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/mikebarb/stt/internal/pack"
@@ -89,6 +90,8 @@ func run(args []string) error {
 		return cmdSetSummary(packPath, flags)
 	case "verify":
 		return cmdVerify(packPath)
+	case "recheck":
+		return cmdRecheck(packPath, flags)
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", cmd)
@@ -327,6 +330,62 @@ func cmdVerify(path string) error {
 	return fmt.Errorf("%d problem(s) found", problems)
 }
 
+// cmdRecheck recomputes the repetition analysis for a pack and rewrites the
+// pack in place.
+//
+// This exists so a diagnostic added after a corpus was produced can be
+// applied retrospectively: the segments are already in the pack, so no
+// re-transcription is needed.
+func cmdRecheck(path string, flags map[string]string) error {
+	p, err := pack.Load(path)
+	if err != nil {
+		return err
+	}
+
+	n := pack.DefaultLoopN
+	minCount := pack.DefaultLoopMinCount
+	minDensity := pack.DefaultLoopMinDensity
+
+	if s := flags["n"]; s != "" {
+		fmt.Sscanf(s, "%d", &n)
+	}
+	if s := flags["min-count"]; s != "" {
+		fmt.Sscanf(s, "%d", &minCount)
+	}
+	if s := flags["min-density"]; s != "" {
+		fmt.Sscanf(s, "%g", &minDensity)
+	}
+
+	loop := pack.DetectLoops(p.ToFormatSegments(), n, minCount, minDensity)
+
+	p.Statistics.LoopDensity = loop.Density
+	p.Statistics.RepetitionSeconds = loop.RepetitionSeconds
+
+	if loop.IsLoop() || len(loop.Spans) > 0 {
+		lp := loop
+		p.Loop = &lp
+	} else {
+		p.Loop = nil
+	}
+
+	if err := pack.WriteAtomic(path, p); err != nil {
+		return err
+	}
+
+	status := "ok"
+	if loop.IsLoop() {
+		status = "LOOP"
+	}
+	fmt.Printf("%-8s density %5.1f%%  count %4d  %s\n",
+		status, loop.Density*100, loop.Count, filepath.Base(path))
+	for _, s := range loop.Spans {
+		fmt.Printf("         %s - %s  (%.0fs, %.0f wpm, trigger %s)\n",
+			formatClock(s.Start), formatClock(s.End),
+			s.End-s.Start, s.WordsPerMin, s.Trigger)
+	}
+	return nil
+}
+
 func oneLine(s string) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.TrimSpace(s)
@@ -334,6 +393,15 @@ func oneLine(s string) string {
 		return s[:117] + "..."
 	}
 	return s
+}
+
+// formatClock renders seconds as HH:MM:SS.
+func formatClock(seconds float64) string {
+	total := int(seconds)
+	h := total / 3600
+	m := (total % 3600) / 60
+	s := total % 60
+	return fmt.Sprintf("%d:%02d:%02d", h, m, s)
 }
 
 // unused keeps the json import honest if the file is trimmed later.

@@ -226,7 +226,7 @@ func run() error {
 			}
 
 			if *packOut != "" {
-				if err := packCtx.write(*packOut, newPackFile(rs)); err != nil {
+				if _, err := packCtx.write(*packOut, newPackFile(rs)); err != nil {
 					fmt.Fprintf(os.Stderr, "warning: pack: %v\n", err)
 				} else {
 					fmt.Printf("wrote pack %s\n", *packOut)
@@ -282,7 +282,7 @@ func run() error {
 		if *packOut != "" {
 			pPath = *packOut
 		}
-		if err := packCtx.write(pPath, newPackFile(rs)); err != nil {
+		if _, err := packCtx.write(pPath, newPackFile(rs)); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: pack: %v\n", err)
 		} else {
 			fmt.Printf("wrote pack %s\n", pPath)
