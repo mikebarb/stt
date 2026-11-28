@@ -56,6 +56,13 @@ func TestDetectLoopsFindsRepetition(t *testing.T) {
 	if s.End < 250 {
 		t.Errorf("span end %.0fs does not reach into the repeated region", s.End)
 	}
+
+	if info.Density > 1.0 || s.Density > 1.0 {
+		t.Errorf("density exceeded 1.0: overall=%.3f span=%.3f", info.Density, s.Density)
+	}
+	if info.LastSeconds <= info.FirstSeconds+60 {
+		t.Errorf("first/last span too narrow: first=%.1fs last=%.1fs", info.FirstSeconds, info.LastSeconds)
+	}
 }
 
 // TestDetectLoopsLocalised covers the case the sliding window exists for: a

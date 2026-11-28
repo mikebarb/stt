@@ -136,3 +136,31 @@ func TestPackSummaryAndStaleness(t *testing.T) {
 		t.Fatal("summary should be flagged stale when transcript hash changes")
 	}
 }
+
+func TestPackUpdatedUTCStampedOnWrite(t *testing.T) {
+	p := Build(BuildInput{
+		SourcePath:   "talk.mp3",
+		ModelName:    "base.en",
+		AudioSeconds: 12,
+		Segments:     sampleSegments(),
+	})
+
+	path := filepath.Join(t.TempDir(), "p.stt.json")
+	if err := WriteAtomic(path, p); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(loaded.UpdatedUTC) != 14 {
+		t.Fatalf("UpdatedUTC = %q, want 14-digit yyyymmddhhmmss", loaded.UpdatedUTC)
+	}
+	if _, err := time.Parse(VersionTimeLayout, loaded.UpdatedUTC); err != nil {
+		t.Fatalf("UpdatedUTC %q failed parse: %v", loaded.UpdatedUTC, err)
+	}
+	if loaded.CreatedUTC != p.CreatedUTC {
+		t.Errorf("CreatedUTC changed on write: got %q, want %q", loaded.CreatedUTC, p.CreatedUTC)
+	}
+}

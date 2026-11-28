@@ -131,6 +131,9 @@ func cmdInfo(path string) error {
 	fmt.Printf("pack:        %s\n", path)
 	fmt.Printf("schema:      %s\n", p.Schema)
 	fmt.Printf("created:     %s\n", p.CreatedUTC)
+	if p.UpdatedUTC != "" {
+		fmt.Printf("updated:     %s\n", p.UpdatedUTC)
+	}
 	fmt.Printf("source:      %s\n", p.Source.File)
 	if p.Source.AudioHash != "" {
 		fmt.Printf("audio hash:  %s\n", p.Source.AudioHash)

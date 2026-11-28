@@ -155,12 +155,18 @@ func DetectLoops(segs []format.Segment, n, minCount int, minDensity float64) Loo
 	info.Count = bestCount
 	info.Phrase = bestGram
 	info.Density = round3(float64(bestCount*n) / float64(len(words)))
+	if info.Density > 1.0 {
+		info.Density = 1.0
+	}
 
+	seenFirst := false
 	for i, g := range grams {
 		if g == bestGram {
-			info.FirstSeconds = round3(words[i].start)
+			if !seenFirst {
+				info.FirstSeconds = round3(words[i].start)
+				seenFirst = true
+			}
 			info.LastSeconds = round3(words[i+n-1].start)
-			break
 		}
 	}
 
@@ -188,6 +194,9 @@ func DetectLoops(segs []format.Segment, n, minCount int, minDensity float64) Loo
 				continue
 			}
 			d := float64(bc*n) / float64(windowWords)
+			if d > 1.0 {
+				d = 1.0
+			}
 			if d >= windowThreshold {
 				marks = append(marks, marked{w0, w0 + windowWords, bg, round3(d)})
 			}

@@ -17,7 +17,10 @@ import (
 )
 
 const (
-	SchemaVersion        = "stt-pack/1"
+	SchemaVersion = "stt-pack/1"
+	// VersionTimeLayout is UTC yyyymmddhhmmss (14 digits): fixed-width,
+	// lexicographically sortable, and stateless across machines.
+	VersionTimeLayout    = "20060102150405"
 	ToolName             = "github.com/mikebarb/stt"
 	ToolVersion          = "0.2.0"
 	DefaultConfThreshold = 0.35
@@ -26,6 +29,7 @@ const (
 type Pack struct {
 	Schema      string          `json:"schema"`
 	CreatedUTC  string          `json:"created_utc"`
+	UpdatedUTC  string          `json:"updated_utc"`
 	Tool        ToolInfo        `json:"tool"`
 	Source      SourceInfo      `json:"source"`
 	Model       ModelInfo       `json:"model"`
@@ -270,6 +274,7 @@ func Build(in BuildInput) *Pack {
 	return &Pack{
 		Schema:     SchemaVersion,
 		CreatedUTC: now.UTC().Format(time.RFC3339),
+		UpdatedUTC: now.UTC().Format(VersionTimeLayout),
 		Tool: ToolInfo{
 			Name:    ToolName,
 			Version: ToolVersion,
@@ -412,6 +417,10 @@ func Load(path string) (*Pack, error) {
 
 // WriteAtomic writes the pack as indented JSON via a .part temp file + rename.
 func WriteAtomic(path string, p *Pack) error {
+	// Every tool-driven write advances UpdatedUTC automatically so no
+	// mutation path can forget to bump the version stamp.
+	p.UpdatedUTC = time.Now().UTC().Format(VersionTimeLayout)
+
 	buf, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
